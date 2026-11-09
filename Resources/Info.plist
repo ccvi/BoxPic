@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>BoxPic</string>
+	<key>CFBundleName</key>
+	<string>BoxPic</string>
+	<key>CFBundleExecutable</key>
+	<string>BoxPic</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.ccvi1223.boxpic</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__BOXPIC_VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__BOXPIC_BUILD__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.photography</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 ccvi1223 · ccvi1223@qq.com</string>
+
+
+	<!-- 右键菜单用 NSServices 实现，而不是 Finder 扩展：
+	     Kompressor 那类「在 X 中打开」就是把服务项平铺在右键菜单底部，
+	     不需要扩展授权、不需要用户去系统设置里勾，装完即用。 -->
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>在 BoxPic 中打开</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>openImageInBoxPic</string>
+			<key>NSPortName</key>
+			<string>BoxPic</string>
+			<key>NSRequiredContext</key>
+			<dict>
+				<key>NSApplicationIdentifier</key>
+				<string>com.apple.finder</string>
+			</dict>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.image</string>
+				<string>public.svg-image</string>
+				<string>com.adobe.postscript</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- 右键「打开方式」里出现 BoxPic。Alternate：不抢系统预览的默认地位。 -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Image</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.image</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Scalable Vector Graphic</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.svg-image</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Encapsulated PostScript</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.adobe.postscript</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
