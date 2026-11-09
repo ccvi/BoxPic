@@ -68,8 +68,10 @@ enum ImageEngineError: LocalizedError {
     case encodeFailed(String)
     case unsupported(String)
     case needsGhostscript(String)
+    case needsJXLTool(String)
     case postScriptTimeout(String)
     case postScriptFailed(String, String)
+    case encodeTimeout(String)
 
     var errorDescription: String? {
         switch self {
@@ -80,10 +82,15 @@ enum ImageEngineError: LocalizedError {
         case .needsGhostscript(let name):
             return "「\(name)」需要 Ghostscript 才能渲染。macOS 自 macOS 10.15 起已不带 PostScript 解释器，"
                  + "在终端执行 brew install ghostscript 后重新拖入即可。"
+        case .needsJXLTool(let name):
+            return "找不到 JPEG XL 编码器 cjxl。应用包内应该带一份，"
+                 + "如果这份是从别处拷来的残缺副本，可执行 brew install jpeg-xl 后重试（「\(name)」）。"
         case .postScriptTimeout(let name):
             return "「\(name)」渲染超时（30 秒），文件可能损坏或过于复杂"
         case .postScriptFailed(let name, let message):
             return "「\(name)」PostScript 渲染失败：\(message)"
+        case .encodeTimeout(let name):
+            return "「\(name)」编码超时，文件可能过大或系统繁忙"
         }
     }
 }
@@ -432,6 +439,10 @@ enum ImageEngine {
         if format.usesLibWebP {
             return try WebPEncoder.encode(image, quality: quality)
         }
+        if format.isJXL {
+            // ImageIO 没有 JXL 编码器，交给外部 cjxl
+            return try JXLEncoder.encode(image, quality: quality, name: format.name)
+        }
         if format.isICNS {
             return try icnsData(image)
         }
@@ -522,33 +533,68 @@ enum ImageEngine {
         return out
     }
 
-    /// ICO 必须是正方形，且边长只能取 16/24/32/48/64/128/256。
-    /// 非正方形源图等比缩到 ≤256 后居中放进透明画布（不裁剪内容）。
+    /// ICO 的标准边长阶梯。目标尺寸是多少，就把它以下的标准档**全部**封进同一个文件：
+    ///   256 → 16/32/48/64/128/256
+    ///   128 → 16/32/48/64/128
+    ///    64 → 16/32/48/64
+    ///    32 → 16/32
+    /// Windows 在任务栏、桌面、Alt+Tab、高 DPI 下会自己挑合适的那一张，
+    /// 只封一张的话缩放到别的场景就会糊。
+    private static let icoSizes = [16, 32, 48, 64, 128, 256]
+
+    /// 目标边长 → 要封进去的分辨率列表（升序）。
+    /// 目标不在标准阶梯里（比如用户填了 100）时，把目标自己也加进去，
+    /// 免得「指定 100 却只得到 64 和 128」这种名不副实的结果。
+    static func icoFrames(forTarget side: Int) -> [Int] {
+        let target = min(256, max(1, side))
+        var sizes = icoSizes.filter { $0 <= target }
+        if !sizes.contains(target) { sizes.append(target) }
+        return sizes.sorted()
+    }
+
+    /// ICO 必须是正方形，且边长 ≤256。
+    /// 非正方形源图等比缩到边长内后居中放进透明画布（不裁剪内容）。
     private static func icoData(_ image: CGImage) throws -> Data {
-        let side = 256
-        let scale = min(Double(side) / Double(image.width), Double(side) / Double(image.height))
-        let drawW = max(1, Int((Double(image.width) * scale).rounded()))
-        let drawH = max(1, Int((Double(image.height) * scale).rounded()))
-        guard let ctx = CGContext(data: nil, width: side, height: side,
-                                  bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            throw ImageEngineError.encodeFailed("ICO")
-        }
-        ctx.interpolationQuality = .high
-        ctx.clear(CGRect(x: 0, y: 0, width: side, height: side))
-        ctx.draw(image, in: CGRect(x: (side - drawW) / 2, y: (side - drawH) / 2,
-                                   width: drawW, height: drawH))
+        // 调用方（targetSize）已经把 ICO 的长边夹到 ≤256，拿长边当目标边长
+        let target = min(256, max(1, max(image.width, image.height)))
+        let sides = icoFrames(forTarget: target)
+
         let buffer = NSMutableData()
-        guard let square = ctx.makeImage(),
-              let dest = CGImageDestinationCreateWithData(buffer as CFMutableData, "com.microsoft.ico" as CFString, 1, nil) else {
+        guard let dest = CGImageDestinationCreateWithData(buffer as CFMutableData,
+                                                          "com.microsoft.ico" as CFString,
+                                                          sides.count, nil) else {
             throw ImageEngineError.encodeFailed("ICO")
         }
-        CGImageDestinationAddImage(dest, square, nil)
+        for side in sides {
+            guard let square = squareIcon(image, side: side) else { continue }
+            CGImageDestinationAddImage(dest, square, nil)
+        }
         guard CGImageDestinationFinalize(dest) else {
             throw ImageEngineError.encodeFailed("ICO")
         }
         return buffer as Data
+    }
+
+    /// 把图等比缩进 side×side 的透明正方形里，居中、不裁剪。
+    /// 先走 resize 的逐级减半（大图直接一次插值到 16px 会把细节糊成一坨），
+    /// 再贴到透明画布上。
+    private static func squareIcon(_ image: CGImage, side: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: side, height: side,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        ctx.interpolationQuality = .high
+        ctx.clear(CGRect(x: 0, y: 0, width: side, height: side))
+
+        let scale = min(Double(side) / Double(image.width), Double(side) / Double(image.height))
+        let drawW = max(1, Int((Double(image.width) * scale).rounded()))
+        let drawH = max(1, Int((Double(image.height) * scale).rounded()))
+        let scaled = resize(image, to: CGSize(width: drawW, height: drawH))
+        ctx.draw(scaled, in: CGRect(x: (side - drawW) / 2, y: (side - drawH) / 2,
+                                    width: drawW, height: drawH))
+        return ctx.makeImage()
     }
 
     /// CGImage → PNG 字节（ICNS 内嵌块用）

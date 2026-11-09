@@ -23,6 +23,7 @@ enum SelfTest {
 
         formatTable()
         sizeMath()
+        icoFrames()
         svgInput()
         webpRoundTrip()
         everyFormatEncodes()
@@ -32,6 +33,7 @@ enum SelfTest {
         previewShowsCompression()
         comparisonComposite()
         postScriptInput()
+        jxlRoundTrip()
         noOverwrite()
 
         print("────────────────────────────────────")
@@ -61,7 +63,8 @@ enum SelfTest {
     private static func formatTable() {
         let writable = Set(CGImageDestinationCopyTypeIdentifiers() as? [String] ?? [])
         var missing: [String] = []
-        for format in Formats.all where !format.usesLibWebP {
+        // JXL 系统只解不写，靠外部 cjxl，不能拿 ImageIO 的可写列表去要求它
+        for format in Formats.all where !format.usesLibWebP && !format.isJXL {
             if !writable.contains(format.uti) { missing.append(format.name) }
         }
         check(missing.isEmpty, "格式表与系统 ImageIO 一致",
@@ -102,6 +105,51 @@ enum SelfTest {
             check(max(capped.width, capped.height) <= 256, "ICO 自动夹到 256",
                   detail: "\(Int(capped.width))×\(Int(capped.height))")
         }
+    }
+
+    /// ICO 要封进去的分辨率：目标尺寸决定阶梯
+    ///   256 → 16/32/48/64/128/256；128 → 到 128；64 → 到 64；32 → 16/32
+    private static func icoFrames() {
+        let expect: [(Int, [Int])] = [
+            (256, [16, 32, 48, 64, 128, 256]),
+            (128, [16, 32, 48, 64, 128]),
+            (64,  [16, 32, 48, 64]),
+            (32,  [16, 32])
+        ]
+        for (target, want) in expect {
+            let got = ImageEngine.icoFrames(forTarget: target)
+            check(got == want, "ICO \(target) 封 \(want.count) 档",
+                  detail: got.map(String.init).joined(separator: "/"))
+        }
+
+        // 光算函数不算数，还得确认 ImageIO 真把这几张写进目录了
+        guard let ico = Formats.format(ext: "ico"),
+              let image = makeTestImage(width: 300, height: 200) else {
+            check(false, "ICO 目录")
+            return
+        }
+        let scaled = ImageEngine.resize(image, to: CGSize(width: 256, height: 171))
+        guard let data = try? ImageEngine.encode(scaled, format: ico, quality: 1, metadata: nil) else {
+            check(false, "ICO 目录", detail: "编码失败")
+            return
+        }
+        let sides = icoDirectory(data)
+        check(sides.sorted() == [16, 32, 48, 64, 128, 256], "ICO 目录真的封了 6 档",
+              detail: "\(Fmt.bytes(Int64(data.count))) · " + sides.map(String.init).joined(separator: "/"))
+    }
+
+    /// 读 ICO 目录，返回每个条目的边长（规范里 0 表示 256）
+    private static func icoDirectory(_ data: Data) -> [Int] {
+        let b = [UInt8](data)
+        guard b.count >= 6, b[0] == 0, b[1] == 0, b[2] == 1, b[3] == 0 else { return [] }
+        let count = Int(b[4]) | Int(b[5]) << 8
+        var sides: [Int] = []
+        for i in 0..<count {
+            let off = 6 + i * 16
+            guard off + 16 <= b.count else { break }
+            sides.append(b[off] == 0 ? 256 : Int(b[off]))
+        }
+        return sides
     }
 
     /// SVG 输入（ImageIO 不认 SVG，走 NSImage）
@@ -157,7 +205,7 @@ enum SelfTest {
         }
 
         var failed: [String] = []
-        for format in Formats.all {
+        for format in Formats.all where !(format.isJXL && !JXLEncoder.isAvailable) {
             var options = ConvertOptions(format: format)
             options.resizeMode = .original
             do {
@@ -426,6 +474,40 @@ enum SelfTest {
         }
         let n = Double(w * h)
         return (r / n, g / n, b / n)
+    }
+
+    /// JPEG XL。系统 ImageIO 只能解、不能写，输出必须靠 cjxl：
+    /// 装了就要能编出系统认得的容器，没装就必须给出「brew install jpeg-xl」这句人话。
+    private static func jxlRoundTrip() {
+        guard let image = makeTestImage(width: 320, height: 240) else {
+            check(false, "JXL 测试图生成")
+            return
+        }
+        guard JXLEncoder.isAvailable else {
+            check(true, "JPEG XL 已进格式表（未装 cjxl）", detail: "缺 cjxl，转换时会提示安装")
+            do {
+                _ = try JXLEncoder.encode(image, quality: 0.8, name: "JPEG XL")
+                check(false, "缺 cjxl 时应该报错")
+            } catch {
+                check(error.localizedDescription.contains("jpeg-xl"),
+                      "缺 cjxl 的提示可读", detail: error.localizedDescription)
+            }
+            return
+        }
+        do {
+            let data = try JXLEncoder.encode(image, quality: 0.9, name: "JPEG XL")
+            // 顺手报一下用的是包内那份还是系统装的那份，诊断用
+            let tool = JXLEncoder.toolPath() ?? "-"
+            let bundled = tool.hasPrefix(Bundle.main.bundleURL.path)
+            check(data.count > 100, "JXL 编码",
+                  detail: "\(Fmt.bytes(Int64(data.count))) · \(bundled ? "包内 cjxl" : "系统 cjxl")")
+            // 用系统解码器读回来 —— 能解说明产出的容器是合法的
+            let decoded = ImageEngine.decodedPreview(data: data, maxPixel: 1000)
+            check(decoded?.width == 320 && decoded?.height == 240, "JXL 能被系统解码回来",
+                  detail: decoded.map { "\($0.width)×\($0.height)" } ?? "解不出")
+        } catch {
+            check(false, "JXL 编码", detail: error.localizedDescription)
+        }
     }
 
     /// 同名文件不能覆盖源图

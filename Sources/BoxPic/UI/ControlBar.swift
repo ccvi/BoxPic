@@ -105,11 +105,17 @@ struct ControlBar: View {
         } label: {
             // 比的是解析后的 id：旧偏好里存的是纯 UTI，直接比字符串会导致「一个勾都不显示」
             if prefs.format.id == format.id {
-                Label(format.name, systemImage: "checkmark")
+                Label(menuTitle(format), systemImage: "checkmark")
             } else {
-                Text(format.name)
+                Text(menuTitle(format))
             }
         }
+    }
+
+    /// JXL 要靠外部 cjxl 编码，没装时在菜单里就说清楚，别让用户选完才发现转不了
+    private func menuTitle(_ format: OutputFormat) -> String {
+        if format.isJXL && !JXLEncoder.isAvailable { return "\(format.name)（需 jpeg-xl）" }
+        return format.name
     }
 
     // MARK: 调整大小模式

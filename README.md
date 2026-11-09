@@ -1,13 +1,13 @@
 # BoxPic
 
 原生 macOS 图像格式转换工具。拖进去、选格式、点转换。
-支持 **60 种输入格式**（含 SVG、EPS/PostScript 与 20 余种相机 RAW）、**20 种输出格式**。
+支持 **60 种输入格式**（含 SVG、EPS/PostScript 与 20 余种相机 RAW）、**21 种输出格式**。
 
-当前版本：**1.0.18**
+当前版本：**1.0.19**
 
 - 系统要求：macOS 14 及以上（在 macOS 26 + Apple M 芯片上开发与验证）
 - 作者：ccvi1223 · ccvi1223@qq.com
-- 体积：约 2.5 MB，零外部运行时依赖
+- 体积：约 10 MB（内含 JPEG XL 编码器 cjxl 及其依赖，装完即可用，不需要 Homebrew）
 
 ---
 
@@ -17,7 +17,9 @@
 |---|---|
 | 拖放转换 | 拖文件或整个文件夹进窗口；也可以「文件 → 添加图片」、拖到 Dock 图标、`open -a BoxPic x.png` |
 | EPS / PostScript | `.eps` / `.epsf` / `.ps` 可当输入。macOS 自带已经没有任何 PostScript 解释器，靠外部 **Ghostscript** 渲染（`brew install ghostscript`）；没装时会给一句明确的提示，而不是「不支持的格式」 |
-| 格式转换 | JPG / JPEG / HEIC / HEICS / PNG / WEBP / AVIF / TIFF / PDF / GIF / BMP / JP2 / TGA / PBM / EXR / PSD / ASTC / KTX / ICNS / ICO |
+| 格式转换 | JPG / JPEG / HEIC / HEICS / PNG / WEBP / AVIF / TIFF / PDF / GIF / BMP / JP2 / TGA / PBM / EXR / PSD / ASTC / KTX / ICNS / ICO / **JPEG XL** |
+| JPEG XL | 输出 `.jxl`。系统的 ImageIO 只解不写，所以包内自带 **cjxl**（`Contents/MacOS/cjxl` + `Contents/Frameworks` 里 20 个 dylib，路径已改写成包内相对路径）；质量 100 走无损档，其余按 `-q 0…99` 映射 |
+| ICO 多分辨率 | 一个 `.ico` 里同时封多档：目标 256 → 16/32/48/64/128/256，128 → 到 128，64 → 到 64，32 → 16/32。Windows 按显示场景自己挑 |
 | 尺寸调整 | 原始尺寸 / 最大宽度 / 最大高度 / 百分比 / 指定宽高，等比不放大 |
 | 压缩质量 | 0–100%，一格 5%；只对有损格式生效（PNG/TIFF/PDF 等无损容器会标注「无损」） |
 | 即时预估 | 拖进来的瞬间就按当前参数预跑一次编码，卡片直接显示「1.9 MB → ≈ 359 kB」；改任一参数立刻全部重算 |
@@ -101,10 +103,27 @@ swift build -c release --disable-sandbox   # 直接编译
 改成自己拼容器：`'icns'` + 总长度 + 若干 `(4 字节类型 + 4 字节长度 + PNG)`，
 类型码 `icp4/icp5/ic11/ic12/ic07/ic13/ic08/ic14/ic09/ic10`，同时覆盖 1x 与 @2x。
 
-### 4. ICO 必须是正方形
+### 4. ICO 是多分辨率的，不是一张图
 
 边长只能是 16/24/32/48/64/128/256，非正方形源图直接 Finalize 失败。
-实现：等比缩到 ≤256 后居中放进 256×256 透明画布（letterbox，不裁剪内容）。
+实现：等比缩到目标边长内后居中放进正方形透明画布（letterbox，不裁剪内容）。
+
+**一个 .ico 里同时封多档**，Windows 在任务栏 / 桌面 / Alt+Tab / 高 DPI 下自己挑合适的那张。
+封几档由目标尺寸决定（「大小」怎么设，就封到那一档为止）：
+
+| 目标边长 | 封进去的分辨率 |
+|---|---|
+| 256 | 16 / 32 / 48 / 64 / 128 / 256 |
+| 128 | 16 / 32 / 48 / 64 / 128 |
+| 64 | 16 / 32 / 48 / 64 |
+| 32 | 16 / 32 |
+
+目标不在标准阶梯里（比如手动填 100）时，把目标自己也补进去，不做「只给 64 和 128」这种糊弄。
+多帧靠 `CGImageDestinationAddImage` 连续加即可 —— ImageIO 的 ICO 写入器支持多图，
+实测会自己选容器：**256 那张写 PNG 压缩块，小尺寸写 DIB**（最经典的兼容组合，
+和 ImageMagick / png2ico 的做法一致），不用自己拼容器。一张照片的 6 档图标约 200 kB。
+
+小尺寸那张不能直接把 256 缩到 16：走 `resize` 的逐级减半，一次插值到 16px 会糊成一坨 α 边缘。
 
 ### 5. SVG 输入
 
@@ -135,6 +154,31 @@ macOS 26 自带的东西里**没有任何 PostScript 解释器**，四条路全�
 - 🔴 **临时 PNG 必须在返回前就解码进内存**（`kCGImageSourceShouldCacheImmediately: true`）。
   `CGImageSourceCreateImageAtIndex` 默认懒加载，而临时文件在 `defer` 里已经删掉了 ——
   返回出去的其实是一张「文件已经不在了」的图，画出来全黑。自检里平均色是 (0,0,0) 才发现这条。
+
+### 5.6 JPEG XL 为什么要把 cjxl 打进包里
+
+ImageIO 对 JXL 是**只解不写**：`CGImageSourceCopyTypeIdentifiers()` 里有 `public.jpeg-xl`
+（读没问题），`CGImageDestinationCopyTypeIdentifiers()` 的 22 种里一个 jxl 都没有；
+拿 `public.jpeg-xl` / `org.iso.jpeg-xl` 等四种 UTI 去建 `CGImageDestination` 全部返回 nil，
+`sips -s format jxl` 也是打印了目标路径却不写文件。所以写只能靠外部 `cjxl`。
+
+早先的做法是「探测系统里的 cjxl，没有就提示 brew install」——自己用没问题，但别人下载 dmg
+以后点转换只会看到一句「去装 jpeg-xl」，等于格式摆着不能用。现在把 cjxl 连依赖一起打包：
+
+- `Contents/MacOS/cjxl` + `Contents/Frameworks/*.dylib`（20 个，约 7.3 MB，dmg 因此从 1.6 MB 涨到 4.4 MB）；
+- 依赖是**递归**解析出来的：`otool -L` 拿到直接依赖，`@rpath/xxx` 顺着 `LC_RPATH` 解成真实文件，
+  再继续往下走；`/usr/lib` 与 `/System` 下的一律不跟（那些系统自带）；
+- 加载路径全改成包内相对：cjxl 的依赖指向 `@executable_path/../Frameworks/xxx`，
+  dylib 之间指向 `@loader_path/xxx`，残留的 Homebrew `LC_RPATH` 直接删掉；
+- 打包时用 `env -i PATH=/usr/bin:/bin cjxl --version` 验一次「脱离 Homebrew 也能跑」，
+  不过就直接报警 —— 这条比肉眼确认靠谱，因为 arm64 改过加载命令的二进制没重签会**静默 Killed: 9**；
+- 🔴 **改完加载命令必须立刻重签**，否则一执行就被系统杀掉。签名要在自检之前，不能等主包那一步。
+
+质量映射：滑块 0–100% 直接给 `cjxl -q`，`-q 100` 是 cjxl 的无损档（体积会跳一个数量级，
+1600×1600 的样张 q95 是 126 kB、q100 是 1.67 MB），这是 libjxl 的既定语义，不做额外改写。
+
+许可：libjxl 与它的依赖全是 BSD / Apache-2.0 / MIT，可自由分发；`jpeg-xl-LICENSE.txt`
+和 `jpeg-xl-NOTICE.txt` 随包放在 `Contents/Resources`。
 
 ### 6. 质量参数只对有损格式有效
 
@@ -261,9 +305,9 @@ BoxPic/
 ## 诊断
 
 ```bash
-.build/release/BoxPic --selftest          # 40 项：格式表 / 尺寸 / SVG / EPS / WebP / 全格式落盘 / 质量 /
-                                          #        预估=实际 / 预估稳定 / 预览带压缩痕迹 /
-                                          #        对比图左原图右结果 / 不覆盖
+.build/release/BoxPic --selftest          # 47 项：格式表 / 尺寸 / ICO 多分辨率 / SVG / EPS / WebP / JXL /
+                                          #        全格式落盘 / 质量 / 预估=实际 / 预估稳定 /
+                                          #        预览带压缩痕迹 / 对比图左原图右结果 / 不覆盖
 .build/release/BoxPic --version
 # 把「预估 → 渲染预览 → 合成对比图」整条链路跑一遍并落盘，附带两侧边缘能量
 .build/release/BoxPic --compare-probe <源图> <输出.png> [质量]

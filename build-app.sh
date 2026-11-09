@@ -248,12 +248,6 @@ fi
 
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
-# ------------------------------------------------------------
-# 6. 签名
-#
-# 🔴 铁律：优先用固定的本机自签名身份，找不到才退回 ad-hoc。
-#    系统记 TCC 授权时存的是**指定要求**：ad-hoc 只能钉 cdhash，重编一次就失效。
-# ------------------------------------------------------------
 SIGNING_IDENTITY_NAME="FastFind Local Signing"
 
 detect_signing_identity() {
@@ -266,6 +260,169 @@ if [[ "$DO_SIGN" == "1" ]]; then
     SIGNING_IDENTITY="$(detect_signing_identity || true)"
 fi
 
+# ------------------------------------------------------------
+# 5.5 内置 cjxl（JPEG XL 编码器）
+#
+# macOS 的 ImageIO 只能解 JXL、不能写，输出必须靠 cjxl（brew install jpeg-xl）。
+# 为了让别人拿到 dmg 就能直接出 JXL，把 cjxl 和它的非系统依赖一起塞进包里，
+# 并把加载路径改写成 @executable_path / @loader_path —— 装完不再依赖 Homebrew。
+# ------------------------------------------------------------
+echo "▶ 内置 cjxl（JPEG XL 编码器）…"
+
+FRAMEWORKS_DIR="$CONTENTS/Frameworks"
+
+JXL_SRC=""
+if command -v cjxl > /dev/null 2>&1; then
+    JXL_SRC="$(command -v cjxl)"
+else
+    for cand in /opt/homebrew/bin/cjxl /usr/local/bin/cjxl /opt/local/bin/cjxl; do
+        if [[ -x "$cand" ]]; then JXL_SRC="$cand"; break; fi
+    done
+fi
+
+rpaths_of() {
+    otool -l "$1" 2>/dev/null | awk '/cmd LC_RPATH/ { getline; getline; print $2 }'
+}
+
+# @rpath/xxx 顺着 LC_RPATH 解析成真实文件；系统库一律不跟
+resolve_dep() {
+    local owner="$1" dep="$2" base cand rp
+    case "$dep" in
+        @rpath/*)
+            base="${dep#@rpath/}"
+            while IFS= read -r rp; do
+                [[ -z "$rp" ]] && continue
+                rp="${rp//@loader_path/$(dirname "$owner")}"
+                rp="${rp//@executable_path/$(dirname "$owner")}"
+                cand="$rp/$base"
+                if [[ -f "$cand" ]]; then printf '%s\n' "$cand"; return 0; fi
+            done < <(rpaths_of "$owner")
+            ;;
+        /*)
+            if [[ -f "$dep" ]]; then printf '%s\n' "$dep"; return 0; fi
+            ;;
+    esac
+    return 1
+}
+
+JXL_FILES=()
+JXL_SEEN=" "
+
+# 递归收集非系统依赖（按 basename 去重；macOS 自带 bash 3.2 没有关联数组）
+collect_jxl_deps() {
+    local f="$1" dep real key
+    key="$(basename "$f")"
+    case "$JXL_SEEN" in *" ${key} "*) return 0 ;; esac
+    case "$f" in
+        /usr/lib/*|/System/*) return 0 ;;
+    esac
+    JXL_SEEN="${JXL_SEEN}${key} "
+    JXL_FILES+=("$f")
+    while IFS= read -r dep; do
+        [[ -z "$dep" ]] && continue
+        case "$dep" in
+            /usr/lib/*|/System/*) continue ;;
+        esac
+        if real="$(resolve_dep "$f" "$dep")"; then
+            collect_jxl_deps "$real"
+        fi
+    done < <(otool -L "$f" 2>/dev/null | tail -n +2 | awk '{print $1}')
+}
+
+if [[ -z "$JXL_SRC" ]]; then
+    echo "  ⚠ 没找到 cjxl，本次不内置（JXL 输出会退回系统 PATH，缺就提示用户安装）"
+    echo "    装一下再打包：brew install jpeg-xl"
+else
+    collect_jxl_deps "$JXL_SRC"
+    mkdir -p "$FRAMEWORKS_DIR"
+    cp "$JXL_SRC" "$MACOS_DIR/cjxl"
+    chmod +x "$MACOS_DIR/cjxl"
+
+    for f in "${JXL_FILES[@]}"; do
+        [[ "$f" == "$JXL_SRC" ]] && continue
+        cp "$f" "$FRAMEWORKS_DIR/$(basename "$f")"
+        chmod u+w "$FRAMEWORKS_DIR/$(basename "$f")"
+    done
+
+    # cjxl：依赖改成 @executable_path/../Frameworks/xxx
+    while IFS= read -r dep; do
+        [[ -z "$dep" ]] && continue
+        base="$(basename "$dep")"
+        if [[ -f "$FRAMEWORKS_DIR/$base" ]]; then
+            install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" \
+                "$MACOS_DIR/cjxl" 2>/dev/null || true
+        fi
+    done < <(otool -L "$MACOS_DIR/cjxl" 2>/dev/null | tail -n +2 | awk '{print $1}')
+
+    # 各 dylib：id 改成 @rpath/xxx，互相之间用 @loader_path/xxx
+    for dylib in "$FRAMEWORKS_DIR"/*.dylib; do
+        [[ -f "$dylib" ]] || continue
+        base="$(basename "$dylib")"
+        install_name_tool -id "@rpath/$base" "$dylib" 2>/dev/null || true
+        while IFS= read -r dep; do
+            [[ -z "$dep" ]] && continue
+            depbase="$(basename "$dep")"
+            [[ "$depbase" == "$base" ]] && continue
+            if [[ -f "$FRAMEWORKS_DIR/$depbase" ]]; then
+                install_name_tool -change "$dep" "@loader_path/$depbase" "$dylib" 2>/dev/null || true
+            fi
+        done < <(otool -L "$dylib" 2>/dev/null | tail -n +2 | awk '{print $1}')
+    done
+
+    # 包内不许再指向 Homebrew：残留的 LC_RPATH 直接删掉
+    for macho in "$MACOS_DIR/cjxl" "$FRAMEWORKS_DIR"/*.dylib; do
+        [[ -f "$macho" ]] || continue
+        while IFS= read -r rp; do
+            [[ -z "$rp" ]] && continue
+            case "$rp" in
+                /opt/homebrew*|/usr/local*|@loader_path/../../../*)
+                    install_name_tool -delete_rpath "$rp" "$macho" 2>/dev/null || true
+                    ;;
+            esac
+        done < <(rpaths_of "$macho")
+    done
+
+    # 许可证随包携带（libjxl 及依赖都是 BSD / Apache / MIT）
+    JXL_LICENSE=""
+    for cand in /opt/homebrew/opt/jpeg-xl/LICENSE /usr/local/opt/jpeg-xl/LICENSE; do
+        if [[ -f "$cand" ]]; then JXL_LICENSE="$cand"; break; fi
+    done
+    {
+        echo "BoxPic 内置的 JPEG XL 编码器来自 libjxl (https://github.com/libjxl/libjxl)"
+        echo "及其依赖，均为 BSD / Apache-2.0 / MIT 许可，可自由分发。"
+        echo ""
+        echo "随包文件："
+        printf '  %s\n' "$(basename "$JXL_SRC")" "${JXL_FILES[@]##*/}"
+    } > "$RESOURCES_DIR/jpeg-xl-NOTICE.txt"
+    if [[ -n "$JXL_LICENSE" ]]; then
+        cp "$JXL_LICENSE" "$RESOURCES_DIR/jpeg-xl-LICENSE.txt"
+    fi
+
+    echo "  ✓ cjxl + ${#JXL_FILES[@]} 个依赖（$(du -sh "$FRAMEWORKS_DIR" | awk '{print $1}')）"
+
+    # 🔴 改过加载命令的 arm64 二进制必须先重签，否则一执行就被系统杀掉（Killed: 9）
+    NESTED_SIGN="${SIGNING_IDENTITY:--}"
+    for nested in "$FRAMEWORKS_DIR"/*.dylib "$MACOS_DIR/cjxl"; do
+        [[ -f "$nested" ]] || continue
+        codesign --force --sign "$NESTED_SIGN" --timestamp=none "$nested" > /dev/null 2>&1 || true
+    done
+
+    # 立刻验一次：只留系统路径也能跑，说明真的自包含了
+    if env -i PATH=/usr/bin:/bin "$MACOS_DIR/cjxl" --version > /dev/null 2>&1; then
+        echo "  ✓ 自包含验证通过（脱离 Homebrew 也能执行）"
+    else
+        echo "  ⚠ 内置的 cjxl 跑不起来，检查 dylib 路径改写" >&2
+    fi
+fi
+
+xattr -cr "$APP_DIR" 2>/dev/null || true
+
+# ------------------------------------------------------------
+# 6. 签名
+#
+# 🔴 铁律：优先用固定的本机自签名身份，找不到才退回 ad-hoc。
+#    系统记 TCC 授权时存的是**指定要求**：ad-hoc 只能钉 cdhash，重编一次就失效。
+# ------------------------------------------------------------
 if [[ "$DO_SIGN" == "1" ]]; then
     if [[ -n "$SIGNING_IDENTITY" ]]; then
         echo "▶ 代码签名（${SIGNING_IDENTITY_NAME}）…"

@@ -35,6 +35,9 @@ struct OutputFormat: Identifiable, Hashable {
     static let webpID = "org.webmproject.webp"
 
     var usesLibWebP: Bool { uti == Self.webpID }
+
+    /// JXL 要靠外部 cjxl 编码（系统 ImageIO 只解不写）
+    var isJXL: Bool { uti == "public.jpeg-xl" }
     var isICNS: Bool { uti == "com.apple.icns" }
     var isICO: Bool { uti == "com.microsoft.ico" }
 }
@@ -61,6 +64,7 @@ enum Formats {
         OutputFormat(uti: "com.apple.icns", ext: "icns", name: "ICNS", lossy: false, maxPixel: nil, isExtra: true),
         OutputFormat(uti: "com.microsoft.ico", ext: "ico", name: "ICO", lossy: false, maxPixel: 256, isExtra: true),
         OutputFormat(uti: "public.jpeg-2000", ext: "jp2", name: "JP2", lossy: true, maxPixel: nil, isExtra: true),
+        OutputFormat(uti: "public.jpeg-xl", ext: "jxl", name: "JPEG XL", lossy: true, maxPixel: nil, isExtra: true),
         OutputFormat(uti: "org.khronos.ktx", ext: "ktx", name: "KTX", lossy: false, maxPixel: nil, isExtra: true),
         OutputFormat(uti: "public.pbm", ext: "pbm", name: "PBM", lossy: false, maxPixel: nil, isExtra: true),
         OutputFormat(uti: "com.adobe.pdf", ext: "pdf", name: "PDF", lossy: false, maxPixel: nil, isExtra: true),
